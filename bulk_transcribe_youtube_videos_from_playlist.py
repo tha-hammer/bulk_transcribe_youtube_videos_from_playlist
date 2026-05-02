@@ -159,6 +159,26 @@ def remove_unwanted_segments_from_json(json_file_path, unwanted_text="Subtitles 
     else:
         print(f"No unwanted segments found in {json_file_path}.")
         
+def _serialize_words(segment):
+    """B3 (Silmari plan): turn faster-whisper's segment.words objects into
+    the JSON-serializable shape the bridge consumes.
+
+    Invariant (B4): in source order, words[i].start <= words[i].end and
+    words[i].end <= words[i+1].start. faster-whisper preserves order; we
+    don't sort here. If a future engine returns out-of-order words, B4 will
+    catch it and a sort step lands here.
+    """
+    return [
+        {
+            "word": w.word,
+            "start": round(w.start, 3),
+            "end": round(w.end, 3),
+            "probability": round(w.probability, 3),
+        }
+        for w in (getattr(segment, "words", None) or [])
+    ]
+
+
 async def compute_transcript_with_whisper_from_audio_func(audio_file_path, audio_file_name, audio_file_size_mb):
     cuda_toolkit_path = get_cuda_toolkit_path()
     if cuda_toolkit_path:
@@ -206,7 +226,17 @@ async def compute_transcript_with_whisper_from_audio_func(audio_file_path, audio
         print(f"Computing transcript for {audio_file_name} which has a {audio_file_size_mb:.2f}MB file size...")
         audio_duration_seconds = await get_audio_duration(audio_file_path)
         with tqdm(total=audio_duration_seconds, desc=f"Transcribing {audio_file_name}", unit="s") as pbar:
-            segments, info = await asyncio.to_thread(model.transcribe, audio_file_path, beam_size=10, vad_filter=True)
+            # B3 (Silmari plan §B3): word_timestamps=True so per-word start/end
+            # land alongside each segment. The bridge (B8/B9) needs these to
+            # map card bodies → ref:ev:video=X:t=A-B labels with sub-second
+            # accuracy.
+            segments, info = await asyncio.to_thread(
+                model.transcribe,
+                audio_file_path,
+                beam_size=10,
+                vad_filter=True,
+                word_timestamps=True,
+            )
             for segment in segments:
                 pbar.update(segment.end - segment.start)
                 print(f"Processing segment: [Start: {segment.start:.2f}s, End: {segment.end:.2f}s] for file {audio_file_name} with text: {segment.text}")
@@ -217,7 +247,10 @@ async def compute_transcript_with_whisper_from_audio_func(audio_file_path, audio
                     "start": round(segment.start, 2),
                     "end": round(segment.end, 2),
                     "text": segment.text,
-                    "avg_logprob": round(segment.avg_logprob, 2)
+                    "avg_logprob": round(segment.avg_logprob, 2),
+                    # B3: serialize per-word timestamps into segment metadata.
+                    # B4 invariant: words[i].end <= words[i+1].start in source order.
+                    "words": _serialize_words(segment),
                 }
                 combined_transcript_text_list_of_metadata_dicts.append(metadata)
     if not combined_transcript_text_list_of_metadata_dicts:
