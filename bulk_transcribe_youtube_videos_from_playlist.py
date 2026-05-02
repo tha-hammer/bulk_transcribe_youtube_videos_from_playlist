@@ -1,4 +1,26 @@
 import os
+
+# ─── B1+B5: env-driven config — VALIDATED BEFORE HEAVY IMPORTS ───────────────
+# Plan §§B1, B5. Reading config first means a missing OPENAI_API_KEY (or any
+# misconfiguration) fails the module-load instantly instead of paying ~10s
+# of import time for openai / faster_whisper / pytubefix only to raise at the
+# bottom. Tests in tests/test_no_hardcoded_secrets.py rely on this ordering
+# so they can run without the heavy ML deps installed.
+convert_single_video = 1
+use_spacy_for_sentence_splitting = 1
+use_openai_api_for_transcription = int(os.environ.get("USE_OPENAI_API", "0"))
+if use_openai_api_for_transcription:
+    openai_api_key = os.environ["OPENAI_API_KEY"]  # KeyError on missing — fail fast
+    if not openai_api_key.strip():
+        raise ValueError("OPENAI_API_KEY is set but empty")
+else:
+    openai_api_key = None
+max_simultaneous_youtube_downloads = 4
+disable_cuda_override = int(os.environ.get("DISABLE_CUDA", "0"))
+single_video_url = 'https://www.youtube.com/watch?v=sWAaJF9Wk0w'
+playlist_url = 'https://www.youtube.com/playlist?list=PLjpPMe3LP1XKgqqzqz4j6M8-_M_soYxiV'
+
+# ─── Heavy imports (only worth paying after config validates) ────────────────
 import asyncio
 import re
 import sys
@@ -18,15 +40,6 @@ from concurrent.futures import ProcessPoolExecutor
 
 # Constants for pricing
 WHISPER_COST_PER_MINUTE = 0.006
-
-convert_single_video = 1
-use_spacy_for_sentence_splitting = 1
-use_openai_api_for_transcription = 0
-openai_api_key = 'REPLACE_WITH_YOUR_API_KEY'
-max_simultaneous_youtube_downloads = 4
-disable_cuda_override = 0
-single_video_url = 'https://www.youtube.com/watch?v=sWAaJF9Wk0w'
-playlist_url = 'https://www.youtube.com/playlist?list=PLjpPMe3LP1XKgqqzqz4j6M8-_M_soYxiV'
 
 if convert_single_video:
     print(f"Processing a single video: {single_video_url}")
