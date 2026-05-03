@@ -179,6 +179,36 @@ def _serialize_words(segment):
     ]
 
 
+def _bucket_words_into_segments(segments, flat_words):
+    """B3 OpenAI path: the Whisper API returns segments + a FLAT words array
+    when timestamp_granularities=["word","segment"] is set. Bucket each
+    word into the segment whose [start,end] contains the word's start.
+
+    The OpenAI API does NOT expose per-word probability, so we set 1.0 as a
+    "trusted" sentinel (the bridge doesn't filter by probability anyway —
+    the field exists for diagnostics on the local-whisper path).
+
+    Returns a list of segments with a `words` field appended to each.
+    """
+    out = []
+    word_iter = iter(flat_words or [])
+    next_word = next(word_iter, None)
+    for seg in segments:
+        seg_start = seg.get("start", 0)
+        seg_end = seg.get("end", 0)
+        seg_words = []
+        while next_word is not None and next_word.get("start", 0) < seg_end:
+            seg_words.append({
+                "word": next_word.get("word", ""),
+                "start": round(next_word.get("start", 0), 3),
+                "end": round(next_word.get("end", 0), 3),
+                "probability": 1.0,
+            })
+            next_word = next(word_iter, None)
+        out.append({**seg, "words": seg_words})
+    return out
+
+
 async def compute_transcript_with_whisper_from_audio_func(audio_file_path, audio_file_name, audio_file_size_mb):
     cuda_toolkit_path = get_cuda_toolkit_path()
     if cuda_toolkit_path:
@@ -193,23 +223,31 @@ async def compute_transcript_with_whisper_from_audio_func(audio_file_path, audio
         audio_duration_seconds = await get_audio_duration(audio_file_path)
         estimate_whisper_transcription_cost(audio_duration_seconds)
         with open(audio_file_path, "rb") as audio_file:
+            # B3 (Silmari plan §B3, OpenAI path): timestamp_granularities=
+            # ["word","segment"] returns BOTH the segment array AND a flat
+            # word array on the response root. _bucket_words_into_segments
+            # reshapes them into the per-segment .words[] the bridge expects.
             response = await client.audio.transcriptions.create(
                 model="whisper-1",
                 file=audio_file,
-                response_format="verbose_json"
+                response_format="verbose_json",
+                timestamp_granularities=["word", "segment"],
             )
         # Access the response content
         response_data = json.loads(response.model_dump_json())
         segments = response_data.get('segments', [])
+        flat_words = response_data.get('words', [])
         combined_transcript_text = response_data.get('text', "")
+        bucketed = _bucket_words_into_segments(segments, flat_words)
         combined_transcript_text_list_of_metadata_dicts = [
             {
                 "start": segment.get('start', 0),
                 "end": segment.get('end', 0),
                 "text": segment.get('text', ""),
-                "avg_logprob": segment.get('avg_logprob', 0)
+                "avg_logprob": segment.get('avg_logprob', 0),
+                "words": segment.get('words', []),
             }
-            for segment in segments
+            for segment in bucketed
         ]
     else:
         print(f"Using local Whisper model for transcription of {audio_file_name}...")
